@@ -1,4 +1,5 @@
 use rand::prelude::*;
+use serde_json;
 use std::{collections::HashMap};
 use std::cmp;
 use serde::{Serialize, Deserialize};
@@ -52,7 +53,7 @@ pub struct Player{
     pub skills_for_st_wisdom:HashMap<String,i32>,
     pub skills_for_st_charisma:HashMap<String,i32>,
     // ///人物拥有的武器以及魔法
-    //pub weapons:HashMap<String,Weapon>,
+    pub weapons:HashMap<String,Weapon>,
     //pub tools:HashMap<String,Tool>,
 }
 #[derive(Copy,Clone,Debug,Default)]
@@ -65,6 +66,7 @@ pub enum Abilities{
     Wisdom,
     Charisma,
 }
+
 #[derive(Copy,Clone,Debug,Serialize,Deserialize)]
 ///各种属性值
 pub struct AbilityScores{
@@ -109,7 +111,10 @@ pub struct Coins{
     pub ep:i32,
     pub pp:i32,
 }
-
+#[derive(Clone,Debug,Serialize,Deserialize)]
+pub struct HashedPlayers{
+    pub hashed_players:HashMap<String,Player>,
+}
 #[derive(Copy,Clone,Debug,Serialize,Deserialize)]
 pub enum CoinType{
     Gold,Silver,Copper,Ep,Pp
@@ -182,9 +187,16 @@ pub trait DNDChecker{
 
 ///战斗所需要的5个步骤
 ///一场战斗中只能存在两个阵营。因此任何角色必须在开始或者中途加入某一方。
-pub trait Combat{
-    ///判定突袭，只在第一轮，DM将躲藏方的隐匿结果即敏捷与另一方的感知结果进行对抗。结果为Lose说明被突袭成功。
-    fn determine_surprise(players_1:&HashMap<String,Player>,players_2:&HashMap<String,Player>)->HashMap<String,DNDResult>;
+pub trait Combat where Self:DNDChecker+InformationGetter+InformationGetter{
+    ///判定突袭，只在第一轮。对于所有选择隐匿的人，
+    ///DM将躲藏方的隐匿结果即敏捷与另一方每个人的感知结果进行对抗。某个人结果为Lose说明被突袭成功。
+    /// player_1,player_2分别代表两组战斗者（一场战斗只能有两组战斗者）。
+    /// hide_1和hide_2分别代表每个人是(true)否(false)选择隐匿
+    /// 返回的元组，第一个位置表示第一组战斗者，第二个位置表示第二组战斗者
+    /// 每个表项中i32值为0表不存在对应给出名字的玩家，为1表示被突袭，为2表示没有被突袭
+    fn determine_surprise(players_1:&HashMap<String,Player>,players_2:&HashMap<String,Player>,
+    hide_1:&HashMap<String,bool>,hide_2:&HashMap<String,bool>)->
+    (HashMap<String,i32>,HashMap<String,i32>);
     ///DM决定所有玩家以及怪物的位置
     fn establish_positions(players_1:&HashMap<String,Player>,players_2:&HashMap<String,Player>)->HashMap<String,Position>;
     ///所有参与者投掷先攻骰子确定顺序。返回的结果数值较小的代表顺序在前。
@@ -195,26 +207,30 @@ pub trait Combat{
 ///查找或转换一些信息的函数
 pub trait InformationGetter{
     ///经验值转化为等级，具体规则在代码中写出
+    /// 注意在其他关联函数中exp小于0很可能导致panic
     fn exp_to_level(exp:i32)->Result<i32,&'static str>;
+    ///将玩家等级或者怪物的挑战等级转化为熟练加值。Option返回None表示level不在范围
+    fn level_to_proficiency_modifier(level:i32)->Option<i32>;
     ///将现有货币价值用(用户所需要类型货币数量，铜币数量）表示。如果转换为铜币，元组的第二位为0
     /// 1pp=10gp=20ep=100sp=1000cp
     /// ```
-    /// assert_eq!(coins_to_coin(&Coins{gold:100,silver:0,copper:101,ep:1,pp:1},CoinType::Gold),(110,1));
-    /// assert_eq!(coins_to_copper(&Coins{gold:1,silver:1,copper:1,ep:1,pp:1},CoinType::Copper),(1231,0));
+    /// use minidnd_eecs_havefun::{Player,Coins,CoinType,InformationGetter};
+    /// assert_eq!(<Player as InformationGetter>::coins_to_coin(&Coins{gold:100,silver:0,copper:101,ep:1,pp:1},CoinType::Gold),Ok((111,51)));
+    /// assert_eq!(<Player as InformationGetter>::coins_to_coin(&Coins{gold:1,silver:1,copper:1,ep:1,pp:1},CoinType::Copper),Ok((1161,0)));
     /// ```
     fn coins_to_coin(coins:&Coins,coin_type:CoinType)->Result<(i32,i32),&'static str>;
 }
 ///用于读档、存档的函数
-pub trait SaveLoad<T>{
-    fn save_players(t:&HashMap<String,T>,file_name:&str)->Result<(),&'static str>;
+pub trait SaveLoad<T,F>{
+    fn save_players(t:&mut F,file_name:&str)->Result<(),&'static str>;
     fn load_players(file_name:&str)->Result<HashMap<String,T>,&'static str>;
 }
 impl Player{
-    fn new_by_default()->Player{
+    pub fn new_by_default()->Player{
         Player { name: "Alice".to_string(),walking_speed:30,flying_speed:0,
         armor:8,exp:0,hp:100,..Default::default() }
     }
-    fn new_by_stats(name:String,ability_scores:AbilityScores,coins:Coins,
+    pub fn new_by_stats(name:String,ability_scores:AbilityScores,coins:Coins,
         walking_speed:i32,flying_speed:i32,armor:i32,exp:i32,hp:i32)->Player{
         Player { name, ability_scores, coins,walking_speed,flying_speed,armor,exp,hp,..Default::default()}
     }
@@ -223,6 +239,7 @@ impl Player{
 impl DNDChecker for Player{
     ///合法的难度范围是1到50，合法的d骰数量是1-10,合法的优劣势范围是-1到1（-1代表劣势，0代表没有优势或劣势，1代表优势）
     /// ```
+    /// use minidnd_eecs_havefun::{Player,Abilities,DNDChecker};
     /// assert_eq!(Player::new_by_default().ability_check(Abilities::Strength,51,1,0),Err("dc is not in the range of 1 to 50\n"));
     /// assert_eq!(Player::new_by_default().ability_check(Abilities::Strength,15,11,0),Err("count is not in the range of 1 to 10\n"));
     /// assert_eq!(Player::new_by_default().ability_check(Abilities::Strength,15,1,-2),Err("advantage is not in the range of -1 to 1\n"));
@@ -246,8 +263,9 @@ impl DNDChecker for Player{
     }
     /// 合法的d骰数量是1-10,合法的优劣势范围是-1到1（-1代表劣势，0代表没有优势或劣势，1代表优势）
     /// ```
-    /// assert_eq!(Player::new_by_default().ability_check(Abilities::Strength,11,0),Err("count is not in the range of 1 to 10\n"));
-    /// assert_eq!(Player::new_by_default().ability_check(Abilities::Strength,1,-2),Err("advantage is not in the range of -1 to 1\n"));
+    /// use minidnd_eecs_havefun::{Player,Abilities,DNDChecker};
+    /// assert_eq!(Player::new_by_default().ability_check_stat(Abilities::Strength,11,0),Err("count is not in the range of 1 to 10\n"));
+    /// assert_eq!(Player::new_by_default().ability_check_stat(Abilities::Strength,1,-2),Err("advantage is not in the range of -1 to 1\n"));
     /// ```
     fn ability_check_stat(&self,checker:Abilities,count:i32,advantage:i32)->Result<i32,&'static str> {
         if count<1||count>10 {return Err("count is not in the range of 1 to 10\n")}
@@ -302,35 +320,25 @@ impl DNDChecker for Player{
         let mut max_intelligence=0;
         let mut max_wisdom=0;
         let mut max_charisma=0;
+        let level:i32=<Self as InformationGetter>::exp_to_level(self.exp).unwrap();
+        let proficiency_modifier:i32=<Self as InformationGetter>::level_to_proficiency_modifier(level).unwrap();
         if !self.skills_for_ac_strength.is_empty(){
-            for(_,v)in &(self.skills_for_ac_strength){
-                if *v>max_strength{max_strength=*v;}
-            }
+            max_strength=proficiency_modifier;
         }
         if !self.skills_for_ac_dexterity.is_empty(){
-            for(_,v)in &(self.skills_for_ac_dexterity){
-                if *v>max_dexterity{max_dexterity=*v;}
-            }
+            max_dexterity=proficiency_modifier;
         }
         if !self.skills_for_ac_constitution.is_empty(){
-            for(_,v)in &(self.skills_for_ac_constitution){
-                if *v>max_constitution{max_constitution=*v;}
-            }
+            max_constitution=proficiency_modifier;
         }
         if !self.skills_for_ac_intelligence.is_empty(){
-            for(_,v)in &(self.skills_for_ac_intelligence){
-                if *v>max_intelligence{max_intelligence=*v;}
-            }
+            max_intelligence=proficiency_modifier;
         }
         if !self.skills_for_ac_wisdom.is_empty(){
-            for(_,v)in &(self.skills_for_ac_wisdom){
-                if *v>max_wisdom{max_wisdom=*v;}
-            }
+            max_wisdom=proficiency_modifier;
         }
         if !self.skills_for_ac_charisma.is_empty(){
-            for(_,v)in &(self.skills_for_ac_charisma){
-                if *v>max_charisma{max_charisma=*v;}
-            }
+            max_charisma=proficiency_modifier;
         }
         Modifiers { strength: max_strength, dexterity: max_dexterity,
              constitution: max_constitution, intelligence: max_intelligence,
@@ -343,35 +351,25 @@ impl DNDChecker for Player{
         let mut max_intelligence=0;
         let mut max_wisdom=0;
         let mut max_charisma=0;
+        let level:i32=<Self as InformationGetter>::exp_to_level(self.exp).unwrap();
+        let proficiency_modifier:i32=<Self as InformationGetter>::level_to_proficiency_modifier(level).unwrap();
         if !self.skills_for_st_strength.is_empty(){
-            for(_,v)in &(self.skills_for_st_strength){
-                if *v>max_strength{max_strength=*v;}
-            }
+            max_strength=proficiency_modifier;
         }
         if !self.skills_for_st_dexterity.is_empty(){
-            for(_,v)in &(self.skills_for_st_dexterity){
-                if *v>max_dexterity{max_dexterity=*v;}
-            }
+            max_dexterity=proficiency_modifier;
         }
         if !self.skills_for_st_constitution.is_empty(){
-            for(_,v)in &(self.skills_for_st_constitution){
-                if *v>max_constitution{max_constitution=*v;}
-            }
+            max_constitution=proficiency_modifier;
         }
         if !self.skills_for_st_intelligence.is_empty(){
-            for(_,v)in &(self.skills_for_st_intelligence){
-                if *v>max_intelligence{max_intelligence=*v;}
-            }
+            max_intelligence=proficiency_modifier;
         }
         if !self.skills_for_st_wisdom.is_empty(){
-            for(_,v)in &(self.skills_for_st_wisdom){
-                if *v>max_wisdom{max_wisdom=*v;}
-            }
+            max_wisdom=proficiency_modifier;
         }
         if !self.skills_for_st_charisma.is_empty(){
-            for(_,v)in &(self.skills_for_st_charisma){
-                if *v>max_charisma{max_charisma=*v;}
-            }
+            max_charisma=proficiency_modifier;
         }
         Modifiers { strength: max_strength, dexterity: max_dexterity,
              constitution: max_constitution, intelligence: max_intelligence,
@@ -379,7 +377,9 @@ impl DNDChecker for Player{
     }
     ///单次投掷的上界范围应该是2-100
     /// ```
-    /// assert_eq!(Player::dice(rand::rng(),101),Err("upperbound is not in the range of 2-100"));
+    /// use minidnd_eecs_havefun::{Player,DNDChecker,DNDResult};
+    /// let mut rng=rand::rng();
+    /// assert_eq!(Player::dice(&mut rng,101),Err("upperbound is not in the range of 2-100"));
     /// ```
     fn dice(rng:&mut ThreadRng,upperbound:i32)->Result<i32,&'static str> {
         if upperbound<2||upperbound>100{return Err("upperbound is not in the range of 2-100")}
@@ -390,8 +390,9 @@ impl DNDChecker for Player{
     ///当要投的骰子数量是1，优势代表着再投掷一次，并且取两者较高值。劣势代表着再投掷一次，取两者较低值。
     ///只有骰子数量是1时优劣势才会生效
     /// ```
+    /// use minidnd_eecs_havefun::{Player,DNDChecker,DNDResult};
     /// let mut rng=rand::rng();
-    /// let dice_result=dice_complex(rng,20,1,1);
+    /// let dice_result=Player::dice_complex(&mut rng,20,1,1);
     /// ```
     fn dice_complex(rng:&mut ThreadRng,upperbound:i32,count:i32,advantage:i32)->i32 {
         if count<=1||count>10 {
@@ -416,6 +417,7 @@ impl DNDChecker for Player{
     }
     ///只需要返回鉴定结果的豁免鉴定函数只是调用了带具体投掷结果的鉴定函数
     /// ```
+    /// use minidnd_eecs_havefun::{Player,Abilities,DNDChecker,DNDResult};
     /// let my_player=Player::new_by_default();
     /// let dnd_result=
     /// my_player.saving_throw(Abilities::Strength,12,1,1)
@@ -438,11 +440,12 @@ impl DNDChecker for Player{
     }
     /// 需要具体结果的鉴定函数。
     /// ```
+    /// use minidnd_eecs_havefun::{Player,Abilities,DNDChecker,DNDResult};
     /// let mut my_player=Player::new_by_default();
-    /// my_player.skills_for_ac_strength.insert("skill_for_test".to_string(), 25);
-    /// let dnd_stat=my_player.saving_throw_stat(Abilities::Strength,12,1,1)
+    /// my_player.skills_for_st_strength.insert("skill_for_test".to_string(), 25);
+    /// let dnd_stat=my_player.saving_throw_stat(Abilities::Strength,1,1)
     /// .unwrap_or_else(|e|{println!("Please check again,as {}",e);0});
-    /// assert_eq!(dnd_stat>=25,"dnd_stat={}",dnd_stat);
+    /// assert!(dnd_stat>=25,"dnd_stat={}",dnd_stat);
     /// ```
     fn saving_throw_stat(&self,checker:Abilities,count:i32,advantage:i32)->Result<i32,&'static str> {
         if count<1||count>10 {Err("count is not in the range of 1 to 10\n")}
@@ -483,14 +486,49 @@ impl DNDChecker for Player{
 }
 impl InformationGetter for Player{
     fn exp_to_level(exp:i32)->Result<i32,&'static str> {
-        Ok(exp)
+        match exp{
+            0..300=>Ok(1),
+            300..900=>Ok(2),
+            900..2700=>Ok(3),
+            2700..6500=>Ok(4),
+            6500..14000=>Ok(5),
+            14000..23000=>Ok(6),
+            23000..34000=>Ok(7),
+            34000..48000=>Ok(8),
+            48000..64000=>Ok(9),
+            64000..85000=>Ok(10),
+            85000..100000=>Ok(11),
+            100000..120000=>Ok(12),
+            120000..140000=>Ok(13),
+            140000..165000=>Ok(14),
+            165000..195000=>Ok(15),
+            195000..225000=>Ok(16),
+            225000..265000=>Ok(17),
+            265000..305000=>Ok(18),
+            305000..355000=>Ok(19),
+            355000_i32..=i32::MAX=>Ok(20),
+            _=>Err("your exp is not valid.")
+        }
+    }
+    fn level_to_proficiency_modifier(level:i32)->Option<i32> {
+        match level{
+            1..=4=>Some(2),
+            5..=8=>Some(3),
+            9..=12=>Some(4),
+            13..=16=>Some(5),
+            17..=20=>Some(6),
+            21..=24=>Some(7),
+            25..=28=>Some(8),
+            29..=30=>Some(9),
+            _=>None,
+        }
     }
     ///先把所有货币用铜币计数再用对应货币表示
     fn coins_to_coin(coins:&Coins,coin_type:CoinType)->Result<(i32,i32),&'static str> {
         let f=|c:&Coins|(c.gold*100+c.silver*10+c.copper+c.ep*50+c.pp*1000);
         let g=f(coins);
         if g<0 {return Err("Given Coins are wrong as the sum of them is negative")}
-        let h=|n:i32,t:i32|((n/t,n-n/t));
+        let h=|n:i32,t:i32|((n/t,n-t*(n/t)));
         match coin_type{
             CoinType::Gold=>Ok(h(g,100)),
             CoinType::Silver=>Ok(h(g,10)),
@@ -500,44 +538,89 @@ impl InformationGetter for Player{
         }
     }
 }
-impl SaveLoad<Player> for Player {
+impl SaveLoad<Player,HashedPlayers> for Player {
     fn load_players(file_name:&str)->Result<HashMap<String,Player>,&'static str> {
-        let file=std::fs::File::open(file_name);
-        match file {
-            Ok(f)=>{
-                let players:HashMap<String,Player>=serde_json::from_reader(f).unwrap_or_default();
-                Ok(players)
-            },
-            Err(_)=>Err("File not found"),
-        }
-    }
-    fn save_players(players:&HashMap<String,Player>,file_name:&str)->Result<(),&'static str> {
         use std::fs::File;
-        use std::io::BufWriter;
-        use std::io::Write;
+        use std::io::{BufReader};
+        let file=File::open(file_name).map_err(|_|"Failed to open file")?;
+        let reader = BufReader::new(file);
+        let players:HashMap<String,Player>=serde_json::from_reader(reader).unwrap_or_default();
+        Ok(players)
+    }
+    fn save_players(players:&mut HashedPlayers,file_name:&str)->Result<(),&'static str> {
+        use std::fs::File;
+        use std::io::{Write,BufWriter};
         let file=File::create(file_name).map_err(|_|"Failed to create file")?;
         let mut writer=BufWriter::new(file);
-        for (name,player) in players.iter(){
-            let name_str=format!("Name: {}\n",name);
-            writer.write_all(name_str.as_bytes()).map_err(|_|"Failed to write player name")?;
-            let player_str=format!("{:?}\n",player);
-            writer.write_all(player_str.as_bytes()).map_err(|_|"Failed to write player data")?;
+        match serde_json::to_string(&players.hashed_players){
+                Ok(player_str)=>writer.write_all(player_str.as_bytes()).map_err(|_|"Failed to write player data\n")?,
+                Err(_)=>return Err("Failed to serialize player\n")
         }
-        writer.flush().map_err(|_|"Failed to flush writer")?;
+        writer.flush().map_err(|_|"Failed to flush writer\n")?;
         Ok(())
     }
 }
-/*impl Combat for Player {
-    fn determine_surprise(players_1:&HashMap<String,Player>,players_2:&HashMap<String,Player>)->HashMap<String,DNDResult>{
-        let mut result:HashMap<String,DNDResult>=HashMap::new();
+impl Combat for Player {
+    fn determine_surprise(players_1:&HashMap<String,Player>,players_2:&HashMap<String,Player>,
+    hide_1:&HashMap<String,bool>,hide_2:&HashMap<String,bool>)->
+    (HashMap<String,i32>,HashMap<String,i32>){
+        //wisdom_1和wisdom_2用于存储players_1和players_2中所有player的感知固定值（基准10+能力调整值+熟练加值），注意不是检定值
+        let mut wisdom_1:HashMap<String,i32>=HashMap::new();
+        let mut wisdom_2:HashMap<String,i32>=HashMap::new();
+        //考虑优势时这个值才有意义
+        let tmp_modifier:i32=10;
+        for (str,player) in players_1{
+            wisdom_1.insert(str.clone(),player.ability_scores_to_modifiers().wisdom+player.proficiency_modifiers().wisdom+10);
+        }
+        for (str,player) in players_2{
+            wisdom_2.insert(str.clone(),player.ability_scores_to_modifiers().wisdom+player.proficiency_modifiers().wisdom+10);
+        }
+        let mut ret_players_1:HashMap<String,i32>=HashMap::new();
+        let mut ret_players_2:HashMap<String,i32>=HashMap::new();
+        //对于每个阵营中需要执行隐匿的玩家，如果该玩家不在该阵营中，在对应阵营的返回哈希表中添加表象表示不存在;
+        //如果存在，先计算该玩家的魅力检定值
+        //对于每个敌方阵营中的玩家，依次用魅力检定值与对方阵营的感知固定值进行对抗，平局时算突袭未成功。
+        for (str,_) in hide_1{
+            match players_1.get(str){
+                None=>{ret_players_1.insert(str.clone(), 0);}
+                Some(s)=>{
+                    let s_tmp_charisma=s.ability_check_stat(Abilities::Charisma, 1, 0).unwrap()
+                +(s.ability_scores_to_modifiers().charisma)+(s.proficiency_modifiers().charisma);
+                    for (str,_) in players_2{
+                    let wisdom=*wisdom_1.get(str).unwrap();
+                    if wisdom >=s_tmp_charisma{
+                    ret_players_2.insert(str.clone(),2);
+                    }
+                    else {ret_players_2.insert(str.clone(),1);}
+                }
+            }
+            }
+        }
+        for (str,_) in hide_2{
+            match players_1.get(str){
+                None=>{ret_players_2.insert(str.clone(), 0);}
+                Some(s)=>{
+                    let s_tmp_charisma=s.ability_check_stat(Abilities::Charisma, 1, 0).unwrap()
+                +s.ability_scores_to_modifiers().charisma+s.proficiency_modifiers().charisma;
+                    for (str,_) in players_1{
+                    let wisdom=*wisdom_1.get(str).unwrap();
+                    if wisdom >=s_tmp_charisma{
+                    ret_players_1.insert(str.clone(),2);
+                    }
+                    else {ret_players_1.insert(str.clone(),1);}
+                }
+            }
+            }
+        }
+        (ret_players_1,ret_players_2)
     }
     fn establish_positions(players_1:&HashMap<String,Player>,players_2:&HashMap<String,Player>)->HashMap<String,Position> {
-        
+        HashMap::<String,Position>::new()
     }
     fn roll_initiative(players_1:&HashMap<String,Player>,players_2:&HashMap<String,Player>)->HashMap<String,i32> {
-        
+        HashMap::<String,i32>::new()
     }
     fn take_turns(players_1:&HashMap<String,Player>,players_2:&HashMap<String,Player>,turn:i32)->() {
         
     }
-}*/
+}
