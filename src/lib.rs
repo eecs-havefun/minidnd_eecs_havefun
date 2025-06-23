@@ -1,6 +1,6 @@
 use rand::prelude::*;
 use serde_json;
-use std::{collections::HashMap};
+use std::collections::{HashMap,HashSet};
 use std::cmp;
 use serde::{Serialize, Deserialize};
 //use serde_json::Result as SerdeResult;
@@ -38,20 +38,20 @@ pub struct Player{
     /// 并且玩家职业本身带来的熟练项也直接写到对应哈希表中。哈希表加值为0含义是加上对应等级的加值
     /// 根据规则，一种技能/工具只能提供一个熟练度加值，并且我们不会添加新的属性，因此直接写死6个hashmap，下同
     /// ac即为AbilityCheck属性检定
-    pub skills_for_ac_strength:HashMap<String,i32>,
-    pub skills_for_ac_dexterity:HashMap<String,i32>,
-    pub skills_for_ac_constitution:HashMap<String,i32>,
-    pub skills_for_ac_intelligence:HashMap<String,i32>,
-    pub skills_for_ac_wisdom:HashMap<String,i32>,
-    pub skills_for_ac_charisma:HashMap<String,i32>,
+    pub skills_for_ac_strength:HashSet<String>,
+    pub skills_for_ac_dexterity:HashSet<String>,
+    pub skills_for_ac_constitution:HashSet<String>,
+    pub skills_for_ac_intelligence:HashSet<String>,
+    pub skills_for_ac_wisdom:HashSet<String>,
+    pub skills_for_ac_charisma:HashSet<String>,
     ///通过玩家熟练项的名字（包括技能以及工具）查找对应的熟练项以及对应的豁免加值
     /// st即为SavingThrow豁免检定
-    pub skills_for_st_strength:HashMap<String,i32>,
-    pub skills_for_st_dexterity:HashMap<String,i32>,
-    pub skills_for_st_constitution:HashMap<String,i32>,
-    pub skills_for_st_intelligence:HashMap<String,i32>,
-    pub skills_for_st_wisdom:HashMap<String,i32>,
-    pub skills_for_st_charisma:HashMap<String,i32>,
+    pub skills_for_st_strength:HashSet<String>,
+    pub skills_for_st_dexterity:HashSet<String>,
+    pub skills_for_st_constitution:HashSet<String>,
+    pub skills_for_st_intelligence:HashSet<String>,
+    pub skills_for_st_wisdom:HashSet<String>,
+    pub skills_for_st_charisma:HashSet<String>,
     // ///人物拥有的武器以及魔法
     pub weapons:HashMap<String,Weapon>,
     //pub tools:HashMap<String,Tool>,
@@ -111,7 +111,7 @@ pub struct Coins{
     pub ep:i32,
     pub pp:i32,
 }
-#[derive(Clone,Debug,Serialize,Deserialize)]
+#[derive(Clone,Debug,Default,Serialize,Deserialize)]
 pub struct HashedPlayers{
     pub hashed_players:HashMap<String,Player>,
 }
@@ -155,6 +155,7 @@ pub enum DamageType{
     Pierce,//穿刺
 }
 #[derive(Copy,Clone,Debug)]
+#[allow(dead_code)]
 ///用于战斗时玩家的位置，并且战斗时玩家默认初始位置是50,50
 pub struct Position{
     x:i32,y:i32
@@ -197,12 +198,13 @@ pub trait Combat where Self:DNDChecker+InformationGetter+InformationGetter{
     fn determine_surprise(players_1:&HashMap<String,Player>,players_2:&HashMap<String,Player>,
     hide_1:&HashMap<String,bool>,hide_2:&HashMap<String,bool>)->
     (HashMap<String,i32>,HashMap<String,i32>);
-    ///DM决定所有玩家以及怪物的位置
-    fn establish_positions(players_1:&HashMap<String,Player>,players_2:&HashMap<String,Player>)->HashMap<String,Position>;
-    ///所有参与者投掷先攻骰子确定顺序。返回的结果数值较小的代表顺序在前。
-    fn roll_initiative(players_1:&HashMap<String,Player>,players_2:&HashMap<String,Player>)->HashMap<String,i32>;
-    ///进行一轮，回合数即turn
-    fn take_turns(players_1:&HashMap<String,Player>,players_2:&HashMap<String,Player>,turn:i32)->();
+    ///所有参与者投掷先攻骰子（敏捷检定）确定顺序。返回的结果数值较小的代表顺序在前。
+    fn roll_initiative(players_1:&HashMap<String,Player>,players_2:&HashMap<String,Player>)->
+    (HashMap<String,i32>,HashMap<String,i32>);
+    //DM决定所有玩家以及怪物的位置,todo
+    //fn establish_positions(players_1:&HashMap<String,Player>,players_2:&HashMap<String,Player>)->HashMap<String,Position>;
+    //进行一轮，回合数即turn;todo
+    //fn take_turns(players_1:&HashMap<String,Player>,players_2:&HashMap<String,Player>,turn:i32)->();
 }
 ///查找或转换一些信息的函数
 pub trait InformationGetter{
@@ -223,7 +225,7 @@ pub trait InformationGetter{
 ///用于读档、存档的函数
 pub trait SaveLoad<T,F>{
     fn save_players(t:&mut F,file_name:&str)->Result<(),&'static str>;
-    fn load_players(file_name:&str)->Result<HashMap<String,T>,&'static str>;
+    fn load_players(file_name:&str)->Result<Box<HashedPlayers>,&'static str>;
 }
 impl Player{
     pub fn new_by_default()->Player{
@@ -539,12 +541,14 @@ impl InformationGetter for Player{
     }
 }
 impl SaveLoad<Player,HashedPlayers> for Player {
-    fn load_players(file_name:&str)->Result<HashMap<String,Player>,&'static str> {
+    fn load_players(file_name:&str)->Result<Box<HashedPlayers>,&'static str> {
         use std::fs::File;
         use std::io::{BufReader};
         let file=File::open(file_name).map_err(|_|"Failed to open file")?;
         let reader = BufReader::new(file);
-        let players:HashMap<String,Player>=serde_json::from_reader(reader).unwrap_or_default();
+        let mut players:Box<HashedPlayers>=Box::new(
+        HashedPlayers{hashed_players:HashMap::<String,Player>::new()});
+        *players=serde_json::from_reader(reader).unwrap_or_default();
         Ok(players)
     }
     fn save_players(players:&mut HashedPlayers,file_name:&str)->Result<(),&'static str> {
@@ -568,7 +572,7 @@ impl Combat for Player {
         let mut wisdom_1:HashMap<String,i32>=HashMap::new();
         let mut wisdom_2:HashMap<String,i32>=HashMap::new();
         //考虑优势时这个值才有意义
-        let tmp_modifier:i32=10;
+        //let tmp_modifier:i32=10;
         for (str,player) in players_1{
             wisdom_1.insert(str.clone(),player.ability_scores_to_modifiers().wisdom+player.proficiency_modifiers().wisdom+10);
         }
@@ -614,13 +618,35 @@ impl Combat for Player {
         }
         (ret_players_1,ret_players_2)
     }
-    fn establish_positions(players_1:&HashMap<String,Player>,players_2:&HashMap<String,Player>)->HashMap<String,Position> {
+    //not done yet
+    /*fn establish_positions(players_1:&HashMap<String,Player>,players_2:&HashMap<String,Player>)->HashMap<String,Position> {
         HashMap::<String,Position>::new()
+    }*/
+    fn roll_initiative(players_1:&HashMap<String,Player>,players_2:&HashMap<String,Player>)->
+    (HashMap<String,i32>,HashMap<String,i32>) {
+        let mut ret_hash_1=HashMap::<String,i32>::new();
+        let mut ret_hash_2=HashMap::<String,i32>::new();
+        let total_cnt:usize=players_1.len()+players_2.len();
+        let mut my_vec:Vec::<(String,i32)>=Vec::with_capacity(total_cnt);
+        for(str,player)in players_1{
+            my_vec.push((str.clone(),player.ability_check_stat(Abilities::Charisma, 1,0).unwrap()));
+        }
+        for(str,player)in players_2{
+            my_vec.push((str.clone(),player.ability_check_stat(Abilities::Charisma, 1,0).unwrap()));
+        }
+        //std sort默认小到大，相等元素保序
+        my_vec.sort();
+        let mut total_cnt_2:i32=TryInto::<i32>::try_into(total_cnt).unwrap();
+        for(str,_)in my_vec{
+            if players_1.contains_key(&str){
+                ret_hash_1.insert(str, total_cnt_2);
+            }
+            else {
+                ret_hash_2.insert(str, total_cnt_2);
+            }
+            total_cnt_2-=1;
+        }
+        (ret_hash_1,ret_hash_2)
     }
-    fn roll_initiative(players_1:&HashMap<String,Player>,players_2:&HashMap<String,Player>)->HashMap<String,i32> {
-        HashMap::<String,i32>::new()
-    }
-    fn take_turns(players_1:&HashMap<String,Player>,players_2:&HashMap<String,Player>,turn:i32)->() {
-        
-    }
+    //fn take_turns(players_1:&HashMap<String,Player>,players_2:&HashMap<String,Player>,turn:i32)->()
 }
