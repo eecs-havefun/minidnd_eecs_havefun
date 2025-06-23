@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["Abilities","CoinType","DNDResult","DamageType","WeaponCategory"],"struct":["AbilityScores","Coins","HashedPlayers","Modifiers","Player","Position","Weapon"],"trait":["Combat","DNDChecker","InformationGetter","SaveLoad"]};
